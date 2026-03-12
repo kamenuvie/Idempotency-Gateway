@@ -328,3 +328,10 @@ src/
 └── services/
     └── paymentService.js   ← Simulated 2-second payment processing
 ```
+
+### Simulation
+
+
+https://github.com/user-attachments/assets/8c077fbe-351f-48fe-a643-6bab95948fee
+
+
