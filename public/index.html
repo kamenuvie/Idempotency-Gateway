@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FinSafe &#x2014; Idempotency Gateway</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+
+    :root {
+      --bg:          #060910;
+      --surface:     #0d1117;
+      --surface-2:   #141b27;
+      --surface-3:   #1a2235;
+      --border:      #1e2d47;
+      --border-lite: #263650;
+      --emerald:     #10b981;
+      --emerald-bg:  rgba(16,185,129,.12);
+      --cyan:        #06b6d4;
+      --cyan-bg:     rgba(6,182,212,.12);
+      --amber:       #f59e0b;
+      --amber-bg:    rgba(245,158,11,.12);
+      --rose:        #f43f5e;
+      --rose-bg:     rgba(244,63,94,.12);
+      --blue:        #3b82f6;
+      --blue-bg:     rgba(59,130,246,.12);
+      --blue-glow:   rgba(59,130,246,.22);
+      --text:        #e2e8f0;
+      --text-2:      #94a3b8;
+      --text-3:      #4b5d76;
+      --radius:      12px;
+      --radius-sm:   7px;
+      --font:        'Inter', system-ui, sans-serif;
+      --mono:        'JetBrains Mono', 'Courier New', monospace;
+    }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background-image: radial-gradient(rgba(59,130,246,.05) 1px, transparent 1px);
+      background-size: 28px 28px;
+      pointer-events: none; z-index: 0;
+    }
+    .glow-orb { position:fixed;border-radius:50%;filter:blur(100px);pointer-events:none;z-index:0; }
+    .glow-orb.tl  { width:480px;height:480px;top:-130px;left:-120px;background:rgba(59,130,246,.07); }
+    .glow-orb.br  { width:400px;height:400px;bottom:-80px;right:-70px;background:rgba(16,185,129,.06); }
+
+    /* ── Shell ── */
+    .shell {
+      position: relative; z-index: 1;
+      height: 100vh;
+      display: flex; flex-direction: column;
+      padding: 0 20px;
+      max-width: 1600px; margin: 0 auto;
+    }
+
+    /* ── Navbar ── */
+    nav {
+      display:flex;align-items:center;justify-content:space-between;
+      padding:10px 0 10px;
+      border-bottom:1px solid var(--border);
+      margin-bottom:10px;
+      flex-shrink:0;
+    }
+    .logo { display:flex;align-items:center;gap:10px;text-decoration:none; }
+    .logo-icon {
+      width:34px;height:34px;
+      background:linear-gradient(135deg,var(--blue),#6366f1);
+      border-radius:9px;display:flex;align-items:center;justify-content:center;
+      font-size:17px;box-shadow:0 0 18px var(--blue-glow);
+    }
+    .logo-text { font-size:16px;font-weight:800;letter-spacing:-.4px; }
+    .logo-text span { color:var(--blue); }
+    .nav-badge {
+      display:flex;align-items:center;gap:6px;
+      font-size:11px;font-weight:600;color:var(--emerald);
+      background:var(--emerald-bg);border:1px solid rgba(16,185,129,.2);
+      padding:4px 12px;border-radius:20px;
+    }
+    .nav-badge::before { content:'';width:6px;height:6px;border-radius:50%;background:var(--emerald);animation:pulse 2s infinite; }
+
+    /* ── Stats bar ── */
+    .stats-bar {
+      display:grid;grid-template-columns:repeat(4,1fr);gap:10px;
+      margin-bottom:10px;flex-shrink:0;
+    }
+    .stat-card {
+      background:var(--surface);border:1px solid var(--border);
+      border-radius:var(--radius);padding:9px 14px;
+      position:relative;overflow:hidden;transition:border-color .2s;
+    }
+    .stat-card::after { content:'';position:absolute;top:0;left:0;right:0;height:2px; }
+    .stat-card.total::after    { background:linear-gradient(90deg,var(--blue),#6366f1); }
+    .stat-card.success::after  { background:var(--emerald); }
+    .stat-card.cached::after   { background:var(--cyan); }
+    .stat-card.conflict::after { background:var(--amber); }
+    .stat-card:hover { border-color:var(--border-lite); }
+    .stat-label { font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;color:var(--text-3);margin-bottom:3px; }
+    .stat-value { font-size:22px;font-weight:800;letter-spacing:-1px;line-height:1; }
+    .stat-value.total    { color:var(--blue); }
+    .stat-value.success  { color:var(--emerald); }
+    .stat-value.cached   { color:var(--cyan); }
+    .stat-value.conflict { color:var(--amber); }
+    @keyframes stat-bump { 0%{transform:scale(1)} 40%{transform:scale(1.2)} 100%{transform:scale(1)} }
+    .stat-value.bump { animation:stat-bump .28s ease; }
+
+    /* ── App body: left + right cols ── */
+    .app-body {
+      flex: 1; min-height: 0;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 12px;
+      padding-bottom: 10px;
+    }
+
+    /* ── Left col: wallet + form ── */
+    .left-col {
+      display: flex; flex-direction: column;
+      gap: 10px; min-height: 0; overflow-y: auto;
+    }
+
+    /* ── Right col: log + flow ── */
+    .right-col {
+      display: flex; flex-direction: column;
+      gap: 10px; min-height: 0;
+    }
+
+    /* ── Wallet card ── */
+    .wallet-card {
+      background: linear-gradient(135deg,#0f1e38 0%,#0d1422 60%,#091426 100%);
+      border: 1px solid rgba(59,130,246,.25);
+      border-radius: 16px;
+      padding: 14px 18px;
+      position: relative; overflow: hidden; flex-shrink: 0;
+      box-shadow: 0 6px 28px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.04);
+    }
+    .wallet-card::before {
+      content:'';position:absolute;inset:0;
+      background:radial-gradient(ellipse at 20% 20%,rgba(59,130,246,.12) 0%,transparent 60%);
+      pointer-events:none;
+    }
+    .wallet-top { display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;position:relative;z-index:1; }
+    .wallet-chip-small { width:28px;height:22px;border-radius:4px;background:linear-gradient(135deg,#c9a84c,#f4d27a);position:relative; }
+    .wallet-chip-small::after { content:'';position:absolute;left:9px;top:0;bottom:0;width:2px;border-radius:2px;background:rgba(0,0,0,.2); }
+    .wallet-network { display:flex; }
+    .wallet-network span { width:22px;height:22px;border-radius:50%;border:2px solid rgba(0,0,0,.3);margin-left:-7px;box-shadow:0 2px 6px rgba(0,0,0,.4); }
+    .wallet-network span:first-child { background:linear-gradient(135deg,#f97316,#ef4444); }
+    .wallet-network span:last-child  { background:linear-gradient(135deg,#ef4444,#be123c); }
+    .wallet-label { font-size:10px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:rgba(148,163,184,.55);margin-bottom:2px;position:relative;z-index:1; }
+    .wallet-balance { font-size:26px;font-weight:800;letter-spacing:-1px;color:#fff;position:relative;z-index:1;line-height:1; }
+    .wallet-balance.debit   { animation:wallet-debit .5s ease; }
+    .wallet-balance.blocked { animation:wallet-blocked .5s ease; }
+    @keyframes wallet-debit   { 0%{color:#fff} 30%{color:var(--rose)} 100%{color:#fff} }
+    @keyframes wallet-blocked { 0%{color:#fff} 30%{color:var(--amber)} 100%{color:#fff} }
+    .wallet-currency { font-size:12px;font-weight:600;color:rgba(148,163,184,.65);margin-left:4px; }
+    .wallet-meta { display:flex;gap:20px;margin-top:10px;position:relative;z-index:1; }
+    .wallet-meta-label { font-size:9px;font-weight:600;letter-spacing:.7px;text-transform:uppercase;color:rgba(148,163,184,.45); }
+    .wallet-meta-val   { font-size:13px;font-weight:700;color:var(--text-2);margin-top:1px;font-family:var(--mono); }
+
+    /* ── Card ── */
+    .card { background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden; }
+    .card.flex-col { display:flex;flex-direction:column;flex:1;min-height:0; }
+    .card-header { padding:10px 16px 9px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0; }
+    .card-title    { font-size:13px;font-weight:700; }
+    .card-subtitle { font-size:11px;color:var(--text-3);margin-top:1px; }
+    .card-body { padding:12px 16px; }
+    .card-body.flex-col { display:flex;flex-direction:column;flex:1;min-height:0;overflow-y:auto; }
+
+    /* ── Form ── */
+    .form-group { margin-bottom:10px; }
+    label { display:block;font-size:10px;font-weight:700;color:var(--text-3);letter-spacing:.7px;margin-bottom:5px;text-transform:uppercase; }
+    .input-row { display:flex;gap:8px; }
+    input, select {
+      width:100%;background:var(--surface-2);border:1px solid var(--border);
+      color:var(--text);border-radius:var(--radius-sm);padding:8px 11px;
+      font-size:13px;font-family:var(--font);outline:none;
+      transition:border-color .2s,box-shadow .2s;
+    }
+    input:focus, select:focus { border-color:var(--blue);box-shadow:0 0 0 2px var(--blue-glow); }
+    select option { background:var(--surface-2); }
+    .input-prefix-wrap { position:relative;flex:1; }
+    .input-prefix { position:absolute;left:11px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--text-3);font-weight:600;pointer-events:none; }
+    .input-prefix-wrap input { padding-left:24px; }
+    .key-row { display:flex;gap:7px; }
+    .key-row input { flex:1;font-size:11px;font-family:var(--mono);color:var(--blue);background:var(--surface-3); }
+    .btn-gen { background:var(--surface-3);border:1px solid var(--border-lite);color:var(--text-2);border-radius:var(--radius-sm);padding:0 11px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all .15s; }
+    .btn-gen:hover { background:var(--border-lite);color:var(--text); }
+
+    /* Scenario buttons &#x2014; 4 in a 2x2 grid, compact */
+    .scenario-grid { display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px; }
+    .scenario-btn {
+      background:var(--surface-2);border:1px solid var(--border);color:var(--text-2);
+      border-radius:var(--radius-sm);padding:6px 8px;font-size:11px;font-weight:600;
+      cursor:pointer;display:flex;align-items:center;gap:5px;transition:all .15s;
+    }
+    .scenario-btn:hover  { border-color:var(--border-lite);color:var(--text); }
+    .scenario-btn.active { border-color:var(--blue);background:rgba(59,130,246,.08);color:#a5c8ff; }
+
+    /* Hint &#x2014; one slim line */
+    .hint-bar {
+      background:rgba(59,130,246,.06);border:1px solid rgba(59,130,246,.13);
+      border-radius:6px;padding:6px 10px;font-size:11px;color:var(--text-2);
+      margin-bottom:10px;line-height:1.4;
+    }
+
+    .btn-send { width:100%;background:linear-gradient(135deg,var(--blue),#6366f1);border:none;color:#fff;border-radius:var(--radius-sm);padding:10px;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s,transform .1s;display:flex;align-items:center;justify-content:center;gap:7px;letter-spacing:.2px;box-shadow:0 3px 18px rgba(59,130,246,.28); }
+    .btn-send:hover   { opacity:.9;transform:translateY(-1px); }
+    .btn-send:active  { transform:translateY(0); }
+    .btn-send:disabled{ opacity:.5;cursor:not-allowed;transform:none; }
+    .spinner { width:14px;height:14px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;display:none; }
+
+    .response-box { margin-top:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;display:none; }
+    .response-box.visible { display:block;animation:fadeSlide .2s ease; }
+    .response-header { padding:7px 12px;display:flex;align-items:center;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;border-bottom:1px solid var(--border); }
+    .response-header.ok     { background:var(--emerald-bg);color:var(--emerald);border-color:rgba(16,185,129,.2); }
+    .response-header.cached { background:var(--cyan-bg);color:var(--cyan);border-color:rgba(6,182,212,.2); }
+    .response-header.warn   { background:var(--amber-bg);color:var(--amber);border-color:rgba(245,158,11,.2); }
+    .response-header.err    { background:var(--rose-bg);color:var(--rose);border-color:rgba(244,63,94,.2); }
+    .response-body-pre { padding:10px;font-size:11px;font-family:var(--mono);color:var(--text-2);white-space:pre-wrap;word-break:break-all;max-height:90px;overflow-y:auto;line-height:1.5; }
+
+    /* ── Log ── */
+    .log-header { display:flex;align-items:center;justify-content:space-between;padding:10px 16px 9px;border-bottom:1px solid var(--border);flex-shrink:0; }
+    .btn-clear { background:none;border:1px solid var(--border);color:var(--text-3);border-radius:var(--radius-sm);padding:3px 10px;font-size:10px;font-weight:600;cursor:pointer;transition:all .15s; }
+    .btn-clear:hover { border-color:var(--border-lite);color:var(--text-2); }
+    .log-list { flex:1;min-height:0;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:6px; }
+    .log-empty { flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:30px 16px;color:var(--text-3);gap:8px; }
+    .log-empty-icon { font-size:26px;opacity:.35; }
+    .log-empty-text { font-size:12px; }
+    .log-entry { background:var(--surface-3);border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;animation:fadeSlide .2s ease;cursor:pointer;transition:border-color .15s;flex-shrink:0; }
+    .log-entry:hover { border-color:var(--border-lite); }
+    .log-entry-top { display:flex;align-items:center;gap:8px;padding:8px 12px; }
+    .log-badge { font-size:9px;font-weight:700;letter-spacing:.6px;padding:2px 6px;border-radius:4px;white-space:nowrap;text-transform:uppercase;min-width:60px;text-align:center; }
+    .badge-201   { background:var(--emerald-bg);color:var(--emerald);border:1px solid rgba(16,185,129,.2); }
+    .badge-cache { background:var(--cyan-bg);color:var(--cyan);border:1px solid rgba(6,182,212,.2); }
+    .badge-422   { background:var(--amber-bg);color:var(--amber);border:1px solid rgba(245,158,11,.2); }
+    .badge-400   { background:var(--rose-bg);color:var(--rose);border:1px solid rgba(244,63,94,.2); }
+    .log-meta  { flex:1;min-width:0; }
+    .log-title { font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+    .log-key   { font-size:10px;color:var(--text-3);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+    .log-time  { font-size:10px;color:var(--text-3);white-space:nowrap; }
+    .log-amount{ font-size:13px;font-weight:700;margin-left:auto;padding-left:7px; }
+    .log-detail { padding:0 12px;max-height:0;overflow:hidden;transition:max-height .25s ease,padding .25s ease; }
+    .log-detail.open { max-height:180px;padding:0 12px 10px; }
+    .log-detail pre { font-size:10px;font-family:var(--mono);color:var(--text-2);line-height:1.55;background:var(--surface-2);border:1px solid var(--border);border-radius:5px;padding:8px 10px;overflow-x:auto; }
+
+    /* ── Flow panel &#x2014; compact ── */
+    .flow-panel { background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;flex-shrink:0; }
+    .flow-panel-header {
+      padding:9px 16px;border-bottom:1px solid var(--border);
+      display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;
+    }
+    .flow-legend { display:flex;gap:10px;flex-wrap:wrap; }
+    .flow-legend-item { display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text-3);font-weight:500; }
+    .flow-legend-dot { width:7px;height:7px;border-radius:50%; }
+    .flow-diagram { padding:14px 24px 10px; }
+    .flow-nodes { display:flex;align-items:center;justify-content:space-between; }
+    .flow-connector { flex:1;height:2px;background:var(--border);position:relative;overflow:hidden;margin:0 -1px;margin-bottom:22px; }
+    .flow-connector-fill { position:absolute;top:0;left:0;height:100%;width:0%;transition:width .45s ease; }
+    .flow-node { display:flex;flex-direction:column;align-items:center;gap:5px;position:relative;z-index:1; }
+    .flow-node-circle { width:42px;height:42px;border-radius:50%;background:var(--surface-2);border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:18px;transition:all .35s ease;box-shadow:0 2px 10px rgba(0,0,0,.3); }
+    .flow-node-label { font-size:10px;font-weight:600;color:var(--text-3);text-align:center;max-width:64px;line-height:1.3;transition:color .35s; }
+    .flow-node.active .flow-node-circle  { background:rgba(59,130,246,.15);border-color:var(--blue);box-shadow:0 0 16px rgba(59,130,246,.35); }
+    .flow-node.active .flow-node-label   { color:var(--blue); }
+    .flow-node.done .flow-node-circle    { background:var(--emerald-bg);border-color:var(--emerald);box-shadow:0 0 12px rgba(16,185,129,.3); }
+    .flow-node.done .flow-node-label     { color:var(--emerald); }
+    .flow-node.cached .flow-node-circle  { background:var(--cyan-bg);border-color:var(--cyan);box-shadow:0 0 12px rgba(6,182,212,.3); }
+    .flow-node.cached .flow-node-label   { color:var(--cyan); }
+    .flow-node.warn .flow-node-circle    { background:var(--amber-bg);border-color:var(--amber);box-shadow:0 0 12px rgba(245,158,11,.3); }
+    .flow-node.warn .flow-node-label     { color:var(--amber); }
+    .flow-node.error .flow-node-circle   { background:var(--rose-bg);border-color:var(--rose);box-shadow:0 0 12px rgba(244,63,94,.3); }
+    .flow-node.error .flow-node-label    { color:var(--rose); }
+    .flow-scenario-label { text-align:center;padding:8px;font-size:11px;font-weight:600;color:var(--text-3);border-top:1px solid var(--border);background:var(--surface-2);transition:color .3s; }
+
+    /* tag */
+    .tag { display:inline-flex;align-items:center;gap:4px;font-size:9px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;padding:2px 7px;border-radius:4px; }
+    .tag-blue { background:var(--blue-bg);color:var(--blue);border:1px solid rgba(59,130,246,.2); }
+
+    @keyframes fadeSlide { from{opacity:0;transform:translateY(5px)} to{opacity:1;transform:translateY(0)} }
+    @keyframes spin      { to{transform:rotate(360deg)} }
+    @keyframes pulse     { 0%,100%{opacity:1} 50%{opacity:.4} }
+  </style>
+</head>
+<body>
+
+<div class="glow-orb tl"></div>
+<div class="glow-orb br"></div>
+
+<div class="shell">
+
+  <!-- Navbar -->
+  <nav>
+    <a class="logo" href="#">
+      <div class="logo-icon">&#x1F4B3;</div>
+      <div><div class="logo-text">Fin<span>Safe</span></div></div>
+    </a>
+    <div style="display:flex;align-items:center;gap:12px">
+      <span style="font-size:11px;color:var(--text-3)">Idempotency Gateway</span>
+      <div class="nav-badge">API Running</div>
+    </div>
+  </nav>
+
+  <!-- Stats bar -->
+  <div class="stats-bar">
+    <div class="stat-card total">
+      <div class="stat-label">Total Requests</div>
+      <div class="stat-value total" id="s-total">0</div>
+    </div>
+    <div class="stat-card success">
+      <div class="stat-label">Charged</div>
+      <div class="stat-value success" id="s-success">0</div>
+    </div>
+    <div class="stat-card cached">
+      <div class="stat-label">Cache Hits</div>
+      <div class="stat-value cached" id="s-cache">0</div>
+    </div>
+    <div class="stat-card conflict">
+      <div class="stat-label">Conflicts</div>
+      <div class="stat-value conflict" id="s-conflict">0</div>
+    </div>
+  </div>
+
+  <!-- App body -->
+  <div class="app-body">
+
+    <!-- Left col: Wallet + Form -->
+    <div class="left-col">
+
+      <!-- Wallet -->
+      <div class="wallet-card">
+        <div class="wallet-top">
+          <div class="wallet-chip-small"></div>
+          <div class="wallet-network"><span></span><span></span></div>
+        </div>
+        <div class="wallet-label">Available Balance</div>
+        <div class="wallet-balance" id="wallet-balance">
+          <span id="wallet-amount">5,000.00</span><span class="wallet-currency" id="wallet-currency">GHS</span>
+        </div>
+        <div class="wallet-meta">
+          <div>
+            <div class="wallet-meta-label">Total Debited</div>
+            <div class="wallet-meta-val" id="wallet-debited">0.00</div>
+          </div>
+          <div>
+            <div class="wallet-meta-label">Retries Blocked</div>
+            <div class="wallet-meta-val" id="wallet-blocked">0</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Form -->
+      <div class="card flex-col">
+        <div class="card-header">
+          <div>
+            <div class="card-title">New Payment Request</div>
+            <div class="card-subtitle">POST /api/process-payment</div>
+          </div>
+          <span class="tag tag-blue">Live</span>
+        </div>
+        <div class="card-body flex-col">
+
+          <div style="margin-bottom:10px">
+            <label>Scenarios</label>
+            <div class="scenario-grid">
+              <button class="scenario-btn active" data-scenario="first" onclick="pickScenario(this,'first')">
+                &#x2705; First Payment
+              </button>
+              <button class="scenario-btn" data-scenario="duplicate" onclick="pickScenario(this,'duplicate')">
+                &#x1F501; Retry Same Key
+              </button>
+              <button class="scenario-btn" data-scenario="conflict" onclick="pickScenario(this,'conflict')">
+                &#x26A0;&#xFE0F; Change Amount
+              </button>
+              <button class="scenario-btn" data-scenario="nokey" onclick="pickScenario(this,'nokey')">
+                &#x1F6AB; No Key
+              </button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Amount &amp; Currency</label>
+            <div class="input-row">
+              <div class="input-prefix-wrap">
+                <span class="input-prefix">&#xa2;</span>
+                <input type="number" id="f-amount" value="100" min="1" placeholder="0.00" />
+              </div>
+              <select id="f-currency" style="width:96px;flex-shrink:0">
+                <option value="GHS">GHS</option>
+                <option value="USD">USD</option>
+                <option value="NGN">NGN</option>
+                <option value="EUR">EUR</option>
+                <option value="GBP">GBP</option>
+                <option value="KES">KES</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Idempotency Key</label>
+            <div class="key-row">
+              <input type="text" id="f-key" value="" placeholder="generate or type a key&hellip;" />
+              <button class="btn-gen" onclick="generateKey()">&#x2699; Gen</button>
+            </div>
+          </div>
+
+          <div class="hint-bar" id="scenario-hint">
+            &#x1F4A1; <strong>First Payment:</strong> Processes and debits your wallet.
+          </div>
+
+          <button class="btn-send" id="btn-send" onclick="sendRequest()">
+            <span id="send-txt">Send Payment</span>
+            <div class="spinner" id="spinner"></div>
+          </button>
+
+          <div class="response-box" id="response-box">
+            <div class="response-header" id="resp-header">Response</div>
+            <pre class="response-body-pre" id="resp-body"></pre>
+          </div>
+
+        </div>
+      </div>
+    </div><!-- end left-col -->
+
+    <!-- Right col: Log + Flow -->
+    <div class="right-col">
+
+      <!-- Transaction log -->
+      <div class="card flex-col">
+        <div class="log-header">
+          <div>
+            <div class="card-title">Transaction Log</div>
+            <div class="card-subtitle">Click any entry to expand</div>
+          </div>
+          <button class="btn-clear" onclick="clearLog()">Clear</button>
+        </div>
+        <div class="log-list" id="log-list">
+          <div class="log-empty" id="log-empty">
+            <div class="log-empty-icon">&#x1F4CB;</div>
+            <div class="log-empty-text">No requests yet. Send a payment.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Animated flow panel -->
+      <div class="flow-panel">
+        <div class="flow-panel-header">
+          <div>
+            <div class="card-title">Gateway Flow</div>
+          </div>
+          <div class="flow-legend">
+            <div class="flow-legend-item"><div class="flow-legend-dot" style="background:var(--blue)"></div>Active</div>
+            <div class="flow-legend-item"><div class="flow-legend-dot" style="background:var(--emerald)"></div>Done</div>
+            <div class="flow-legend-item"><div class="flow-legend-dot" style="background:var(--cyan)"></div>Cache</div>
+            <div class="flow-legend-item"><div class="flow-legend-dot" style="background:var(--amber)"></div>Conflict</div>
+            <div class="flow-legend-item"><div class="flow-legend-dot" style="background:var(--rose)"></div>Blocked</div>
+          </div>
+        </div>
+        <div class="flow-diagram">
+          <div class="flow-nodes">
+            <div class="flow-node" id="fn-client">
+              <div class="flow-node-circle">&#x1F4E4;</div>
+              <div class="flow-node-label">Client</div>
+            </div>
+            <div class="flow-connector"><div class="flow-connector-fill" id="fc-1" style="background:var(--blue)"></div></div>
+            <div class="flow-node" id="fn-lookup">
+              <div class="flow-node-circle">&#x1F50D;</div>
+              <div class="flow-node-label">Key Lookup</div>
+            </div>
+            <div class="flow-connector"><div class="flow-connector-fill" id="fc-2" style="background:var(--blue)"></div></div>
+            <div class="flow-node" id="fn-process">
+              <div class="flow-node-circle">&#x2699;&#xFE0F;</div>
+              <div class="flow-node-label">Process</div>
+            </div>
+            <div class="flow-connector"><div class="flow-connector-fill" id="fc-3" style="background:var(--blue)"></div></div>
+            <div class="flow-node" id="fn-store">
+              <div class="flow-node-circle">&#x1F4BE;</div>
+              <div class="flow-node-label">Store</div>
+            </div>
+            <div class="flow-connector"><div class="flow-connector-fill" id="fc-4" style="background:var(--blue)"></div></div>
+            <div class="flow-node" id="fn-respond">
+              <div class="flow-node-circle">&#x1F4E9;</div>
+              <div class="flow-node-label">Respond</div>
+            </div>
+          </div>
+        </div>
+        <div class="flow-scenario-label" id="flow-label">Send a request to see the flow animate</div>
+      </div>
+
+    </div><!-- end right-col -->
+
+  </div><!-- end app-body -->
+
+</div><!-- end shell -->
+
+<script>
+  const WALLET_START = 5000;
+  let walletBalance  = WALLET_START;
+  let walletCurrency = 'GHS';
+  let totalDebited   = 0;
+  let retriesBlocked = 0;
+  const stats = { total:0, success:0, cache:0, conflict:0 };
+  let lastKey = null;
+  let currentScenario = 'first';
+
+  function uuidv4() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      var r = (Math.random() * 16) | 0;
+      return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+    });
+  }
+
+  var hints = {
+    first:     '<strong>First Payment:</strong> Processes and debits your wallet.',
+    duplicate: '<strong>Retry Same Key:</strong> Replays cached response &#x2014; wallet <em>not</em> charged.',
+    conflict:  '<strong>Change Amount:</strong> Key reused with different body &#x2014; 422 Conflict.',
+    nokey:     '<strong>No Key:</strong> Missing header &#x2014; rejected with 400.',
+  };
+  var hintIcons = { first:'&#x1F4A1;', duplicate:'&#x1F501;', conflict:'&#x26A0;&#xFE0F;', nokey:'&#x1F6AB;' };
+
+  function pickScenario(btn, scenario) {
+    document.querySelectorAll('.scenario-btn').forEach(function(b) { b.classList.remove('active'); });
+    btn.classList.add('active');
+    currentScenario = scenario;
+    document.getElementById('scenario-hint').innerHTML = hintIcons[scenario] + ' ' + hints[scenario];
+    if (scenario === 'first') {
+      generateKey();
+      document.getElementById('f-amount').value = 100;
+    } else if (scenario === 'duplicate') {
+      if (lastKey) document.getElementById('f-key').value = lastKey;
+      document.getElementById('f-amount').value = 100;
+    } else if (scenario === 'conflict') {
+      if (lastKey) document.getElementById('f-key').value = lastKey;
+      document.getElementById('f-amount').value = 9999;
+    } else if (scenario === 'nokey') {
+      document.getElementById('f-key').value = '';
+      document.getElementById('f-amount').value = 100;
+    }
+    document.getElementById('f-currency').value = walletCurrency;
+  }
+
+  function generateKey() {
+    document.getElementById('f-key').value = 'key-' + uuidv4();
+  }
+
+  async function sendRequest() {
+    var amount   = parseFloat(document.getElementById('f-amount').value);
+    var currency = document.getElementById('f-currency').value;
+    var key      = document.getElementById('f-key').value.trim();
+    walletCurrency = currency;
+    document.getElementById('wallet-currency').textContent = currency;
+
+    setLoading(true);
+    resetFlow();
+    activateFlowNode('fn-client', 'active');
+
+    var headers = { 'Content-Type': 'application/json' };
+    if (key) headers['Idempotency-Key'] = key;
+
+    var status, data, cacheHit = false, elapsed;
+    var t0 = Date.now();
+    try {
+      var res = await fetch('/api/process-payment', {
+        method: 'POST', headers: headers,
+        body: JSON.stringify({ amount: amount, currency: currency }),
+      });
+      elapsed  = Date.now() - t0;
+      status   = res.status;
+      cacheHit = res.headers.get('X-Cache-Hit') === 'true';
+      data     = await res.json();
+    } catch(e) {
+      setLoading(false);
+      showResponse('err', 'Network Error', JSON.stringify({ error: e.message }, null, 2));
+      return;
+    }
+
+    setLoading(false);
+    stats.total++;
+    if (status === 201 && !cacheHit)         { stats.success++; if (key) lastKey = key; }
+    else if (cacheHit)                         stats.cache++;
+    else if (status === 422 || status === 409) stats.conflict++;
+    updateStats();
+
+    var type, label;
+    if (cacheHit)           { type = 'cached'; label = status + ' Cache Hit (' + elapsed + 'ms)'; }
+    else if (status === 201){ type = 'ok';     label = status + ' Created (' + elapsed + 'ms)'; }
+    else if (status === 422){ type = 'warn';   label = status + ' Conflict (' + elapsed + 'ms)'; }
+    else                    { type = 'err';    label = status + ' Error (' + elapsed + 'ms)'; }
+
+    updateWallet(type, amount);
+    setTimeout(function() { animateFlow(type); }, 300);
+    showResponse(type, label, JSON.stringify(data, null, 2));
+    addLogEntry({ type:type, status:status, cacheHit:cacheHit, key:key, amount:amount, currency:currency, elapsed:elapsed, data:data, label:label });
+  }
+
+  function updateWallet(type, amount) {
+    var balEl = document.getElementById('wallet-balance');
+    var amtEl = document.getElementById('wallet-amount');
+    if (type === 'ok') {
+      walletBalance -= amount; totalDebited += amount;
+      balEl.classList.remove('blocked'); void balEl.offsetWidth;
+      balEl.classList.add('debit');
+      setTimeout(function() { balEl.classList.remove('debit'); }, 600);
+    } else if (type === 'cached') {
+      retriesBlocked++;
+      balEl.classList.remove('debit'); void balEl.offsetWidth;
+      balEl.classList.add('blocked');
+      setTimeout(function() { balEl.classList.remove('blocked'); }, 600);
+    }
+    amtEl.textContent = formatAmt(walletBalance);
+    document.getElementById('wallet-debited').textContent = formatAmt(totalDebited);
+    document.getElementById('wallet-blocked').textContent = String(retriesBlocked);
+  }
+
+  function formatAmt(n) {
+    return n.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
+  }
+
+  function resetFlow() {
+    ['fn-client','fn-lookup','fn-process','fn-store','fn-respond'].forEach(function(id) {
+      var n = document.getElementById(id);
+      n.classList.remove('active','done','cached','warn','error');
+    });
+    ['fc-1','fc-2','fc-3','fc-4'].forEach(function(id) {
+      document.getElementById(id).style.width = '0%';
+    });
+    document.getElementById('flow-label').style.color = 'var(--text-3)';
+    document.getElementById('flow-label').textContent = 'Animating…';
+  }
+
+  function activateFlowNode(id, state) {
+    var n = document.getElementById(id);
+    n.classList.remove('active','done','cached','warn','error');
+    n.classList.add(state);
+  }
+
+  function fillConn(id, color) {
+    var el = document.getElementById(id);
+    el.style.background = color; el.style.width = '100%';
+  }
+
+  function setFlowLabel(text, color) {
+    var el = document.getElementById('flow-label');
+    el.textContent = text; el.style.color = color || 'var(--text-2)';
+  }
+
+  function d(fn, ms) { setTimeout(fn, ms); }
+
+  function animateFlow(type) {
+    if (type === 'ok') {
+      d(function(){ activateFlowNode('fn-client','active'); }, 0);
+      d(function(){ activateFlowNode('fn-client','done'); fillConn('fc-1','var(--emerald)'); }, 280);
+      d(function(){ activateFlowNode('fn-lookup','active'); }, 450);
+      d(function(){ activateFlowNode('fn-lookup','done'); fillConn('fc-2','var(--emerald)'); }, 750);
+      d(function(){ activateFlowNode('fn-process','active'); }, 920);
+      d(function(){ activateFlowNode('fn-process','done'); fillConn('fc-3','var(--emerald)'); }, 1550);
+      d(function(){ activateFlowNode('fn-store','active'); }, 1700);
+      d(function(){ activateFlowNode('fn-store','done'); fillConn('fc-4','var(--emerald)'); }, 2000);
+      d(function(){ activateFlowNode('fn-respond','active'); }, 2150);
+      d(function(){ activateFlowNode('fn-respond','done'); setFlowLabel('Payment processed & stored — 201 Created','var(--emerald)'); }, 2500);
+    } else if (type === 'cached') {
+      d(function(){ activateFlowNode('fn-client','active'); }, 0);
+      d(function(){ activateFlowNode('fn-client','done'); fillConn('fc-1','var(--cyan)'); }, 280);
+      d(function(){ activateFlowNode('fn-lookup','active'); }, 450);
+      d(function(){
+        activateFlowNode('fn-lookup','cached');
+        var fc2=document.getElementById('fc-2'); fc2.style.background='rgba(6,182,212,.22)'; fc2.style.width='100%';
+        var fc3=document.getElementById('fc-3'); fc3.style.background='rgba(6,182,212,.22)'; fc3.style.width='100%';
+        fillConn('fc-4','var(--cyan)');
+        activateFlowNode('fn-process','cached');
+        activateFlowNode('fn-store','cached');
+        activateFlowNode('fn-respond','cached');
+      }, 800);
+      d(function(){ setFlowLabel('Cache hit — replayed from store, wallet not charged','var(--cyan)'); }, 1100);
+    } else if (type === 'warn') {
+      d(function(){ activateFlowNode('fn-client','active'); }, 0);
+      d(function(){ activateFlowNode('fn-client','done'); fillConn('fc-1','var(--amber)'); }, 280);
+      d(function(){ activateFlowNode('fn-lookup','active'); }, 450);
+      d(function(){ activateFlowNode('fn-lookup','warn'); setFlowLabel('Key reused with different body — 422 Conflict','var(--amber)'); }, 820);
+    } else {
+      d(function(){ activateFlowNode('fn-client','active'); }, 0);
+      d(function(){ activateFlowNode('fn-client','error'); activateFlowNode('fn-lookup','error'); setFlowLabel('Missing Idempotency-Key header — 400 Bad Request','var(--rose)'); }, 320);
+    }
+  }
+
+  function setLoading(on) {
+    document.getElementById('btn-send').disabled = on;
+    document.getElementById('spinner').style.display = on ? 'block' : 'none';
+    document.getElementById('send-txt').textContent  = on ? 'Processing…' : 'Send Payment';
+  }
+
+  function showResponse(type, label, body) {
+    var box = document.getElementById('response-box');
+    var hdr = document.getElementById('resp-header');
+    var pre = document.getElementById('resp-body');
+    box.classList.add('visible');
+    hdr.className   = 'response-header ' + type;
+    hdr.textContent = label;
+    pre.textContent = body;
+  }
+
+  function bumpStat(elId) {
+    var el = document.getElementById(elId);
+    el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump');
+    setTimeout(function() { el.classList.remove('bump'); }, 320);
+  }
+
+  function updateStats() {
+    document.getElementById('s-total').textContent    = stats.total;
+    document.getElementById('s-success').textContent  = stats.success;
+    document.getElementById('s-cache').textContent    = stats.cache;
+    document.getElementById('s-conflict').textContent = stats.conflict;
+    bumpStat('s-total');
+    if (stats.success  > 0) bumpStat('s-success');
+    if (stats.cache    > 0) bumpStat('s-cache');
+    if (stats.conflict > 0) bumpStat('s-conflict');
+  }
+
+  var logCount = 0;
+
+  function addLogEntry(opts) {
+    var empty = document.getElementById('log-empty');
+    if (empty) empty.style.display = 'none';
+
+    var id       = 'log-' + (++logCount);
+    var time     = new Date().toLocaleTimeString();
+    var type     = opts.type, status = opts.status, cacheHit = opts.cacheHit;
+    var key      = opts.key, amount = opts.amount, currency = opts.currency;
+    var elapsed  = opts.elapsed, data = opts.data, label = opts.label;
+
+    var badgeClass = cacheHit ? 'badge-cache' : status===201 ? 'badge-201' : status===422 ? 'badge-422' : 'badge-400';
+    var badgeText  = cacheHit ? '↩ CACHED' : status===201 ? '✓ 201' : status===422 ? '⚠ 422' : '✗ ' + status;
+    var amtColor   = type==='ok' ? 'var(--rose)' : type==='cached' ? 'var(--text-3)' : 'var(--amber)';
+    var amtPrefix  = type==='ok' ? '−' : '';
+    var titleMap   = {
+      ok:     'Charged ' + amount + ' ' + currency,
+      cached: 'Replayed — ' + amount + ' ' + currency,
+      warn:   'Rejected — ' + amount + ' ' + currency,
+      err:    'Error: ' + status,
+    };
+
+    var entry = document.createElement('div');
+    entry.className = 'log-entry';
+
+    var detail = document.createElement('div');
+    detail.className = 'log-detail'; detail.id = id;
+    var pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(data, null, 2);
+    detail.appendChild(pre);
+
+    var top = document.createElement('div');
+    top.className = 'log-entry-top';
+    top.setAttribute('onclick', "toggleDetail('" + id + "')");
+    top.innerHTML =
+      '<span class="log-badge ' + badgeClass + '">' + badgeText + '</span>' +
+      '<div class="log-meta">' +
+        '<div class="log-title">' + escHtml(titleMap[type] || label) + '</div>' +
+        '<div class="log-key">'   + escHtml(key || '(no key)') + '</div>' +
+      '</div>' +
+      '<div class="log-time">' + time + ' · ' + elapsed + 'ms</div>' +
+      '<div class="log-amount" style="color:' + amtColor + '">' + amtPrefix + amount.toLocaleString() +
+        ' <span style="font-size:10px;font-weight:500;color:var(--text-3)">' + escHtml(currency) + '</span></div>';
+
+    entry.appendChild(top);
+    entry.appendChild(detail);
+    var list = document.getElementById('log-list');
+    list.insertBefore(entry, list.firstChild);
+  }
+
+  function toggleDetail(id) { document.getElementById(id).classList.toggle('open'); }
+
+  function clearLog() {
+    var list = document.getElementById('log-list');
+    list.innerHTML = '';
+    var empty = document.createElement('div');
+    empty.className = 'log-empty'; empty.id = 'log-empty';
+    empty.innerHTML = '<div class="log-empty-icon">&#x1F4CB;</div><div class="log-empty-text">No requests yet. Send a payment.</div>';
+    list.appendChild(empty);
+    logCount = 0;
+    stats.total=0; stats.success=0; stats.cache=0; stats.conflict=0;
+    updateStats();
+    document.getElementById('response-box').classList.remove('visible');
+    walletBalance=WALLET_START; totalDebited=0; retriesBlocked=0;
+    document.getElementById('wallet-amount').textContent  = formatAmt(WALLET_START);
+    document.getElementById('wallet-debited').textContent = formatAmt(0);
+    document.getElementById('wallet-blocked').textContent = '0';
+    resetFlow();
+    setFlowLabel('Send a request to see the flow animate');
+  }
+
+  function escHtml(s) {
+    if (!s) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  generateKey();
+</script>
+</body>
+</html>
