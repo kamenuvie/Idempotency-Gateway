@@ -1,6 +1,6 @@
 # FinSafe Idempotency Gateway
 
-A production-ready **Idempotency Layer** built with Node.js + Express that ensures payment requests are processed **exactly once** — no matter how many times a client retries.
+A production-ready **Idempotency Layer** built with Node.js + Express that ensures payment requests are processed **exactly once** , no matter how many times a client retries.
 
 ---
 
