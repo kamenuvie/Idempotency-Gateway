@@ -110,7 +110,7 @@ Incoming POST /api/process-payment
 ### Install
 
 ```bash
-git clone <your-repo-url>
+git clone <repo-url>
 cd finsef_idem_layer_api
 npm install
 ```
