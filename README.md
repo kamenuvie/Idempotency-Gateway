@@ -1,133 +1,337 @@
-# Idempotency-Gateway (The "Pay-Once" Protocol)
-This challenge is designed to test your ability to bridge Computer Science fundamentals with Modern Backend Engineering.
+# FinSafe Idempotency Gateway
 
-## 1. Business Context
-> **Client:** *FinSafe Transactions Ltd.* (A fast-growing Payment Processor).
-
-### The Problem
-FinSafe's clients (e-commerce shops) occasionally experience network timeouts. When this happens, their servers automatically retry sending payment requests. Recently, this has led to a critical issue: **Double Charging**.
-
-If a customer clicks "Pay," the request is sent, but the network lags. The client retries the request. FinSafe processes *both* requests, charging the customer twice. This is causing customer churn and regulatory headaches.
-
-### The Solution
-FinSafe needs you to build an **Idempotency Layer**. This is a middleware service (or API) that ensures no matter how many times a client sends the same request, the payment is processed **exactly once**.
+A production-ready **Idempotency Layer** built with Node.js + Express that ensures payment requests are processed **exactly once** — no matter how many times a client retries.
 
 ---
 
-## 2. Technical Objective
-Build a RESTful API that mimics a payment processing backend. It must check for a unique `Idempotency-Key` in the HTTP headers.
+## Table of Contents
 
-* **First Request:** Process the payment and save the response.
-* **Duplicate Request:** Detect the existing key and return the *saved* response immediately, without processing the payment again.
-
-
----
-
-## 3. Getting Started
-
-1.  **Fork this Repository:** Do not clone it directly. Create a fork to your own GitHub account.
-2.  **Environment:** You may use **Node.js, Python, Java or Go, etc.**. You may use any database or in-memory store (Redis, SQLite, or a simple native Map/Dictionary variable).
-3.  **Submission:** Your final submission will be a link to your forked repository containing the source code and documentation.
+1. [Architecture Diagram](#architecture-diagram)
+2. [Setup Instructions](#setup-instructions)
+3. [API Documentation](#api-documentation)
+4. [Design Decisions](#design-decisions)
+5. [Developer's Choice Feature — TTL Key Expiry](#developers-choice-feature--ttl-key-expiry)
 
 ---
 
-## 4. The Architecture Diagram 
-**Task:** Before you write any code, you must design the logic flow.
-**Deliverable:** A **Sequence Diagram** or **Flowchart** included in your README.
+## Architecture Diagram
+
+The sequence below shows all three user stories plus the race-condition bonus within a single flow.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C  as Client (e-commerce shop)
+    participant GW as Idempotency Middleware
+    participant ST as Idempotency Store (in-memory)
+    participant PS as Payment Service
+
+    %% ── User Story 1: First Request (Happy Path) ──────────────────────────
+    Note over C,PS: User Story 1 — First Request
+    C->>GW: POST /api/process-payment<br/>Idempotency-Key: key-abc<br/>{"amount":100,"currency":"GHS"}
+    GW->>ST: get("key-abc")
+    ST-->>GW: null (not found)
+    GW->>ST: setProcessing("key-abc", hash)
+    GW->>PS: processPayment({amount:100, currency:"GHS"})
+    PS-->>GW: {status:"success", message:"Charged 100 GHS", ...} (after 2s delay)
+    GW->>ST: setComplete("key-abc", {statusCode:201, body})
+    GW-->>C: 201 Created<br/>{status:"success", message:"Charged 100 GHS"}
+
+    %% ── User Story 2: Duplicate Request ──────────────────────────────────
+    Note over C,PS: User Story 2 — Duplicate Request (same key + body)
+    C->>GW: POST /api/process-payment<br/>Idempotency-Key: key-abc<br/>{"amount":100,"currency":"GHS"}
+    GW->>ST: get("key-abc")
+    ST-->>GW: {status:"complete", statusCode:201, body:{...}}
+    Note right of GW: Hash matches → replay cached response
+    GW-->>C: 201 Created<br/>X-Cache-Hit: true<br/>{status:"success", message:"Charged 100 GHS"}
+
+    %% ── User Story 3: Conflict ────────────────────────────────────────────
+    Note over C,PS: User Story 3 — Same Key, Different Body (Fraud Check)
+    C->>GW: POST /api/process-payment<br/>Idempotency-Key: key-abc<br/>{"amount":500,"currency":"GHS"}
+    GW->>ST: get("key-abc")
+    ST-->>GW: {status:"complete", requestHash:"original-hash"}
+    Note right of GW: Hash MISMATCH → reject
+    GW-->>C: 422 Unprocessable Entity<br/>{"error":"Idempotency key already used for a different request body."}
+
+    %% ── Bonus: Race Condition ─────────────────────────────────────────────
+    Note over C,PS: Bonus — Concurrent Requests (Race Condition)
+    C->>GW: Request A: POST (key-xyz)
+    GW->>ST: setProcessing("key-xyz", hash)
+    GW->>PS: processPayment(...)  [2s delay begins]
+    C->>GW: Request B: POST (key-xyz) — arrives while A is still processing
+    GW->>ST: get("key-xyz")
+    ST-->>GW: {status:"processing"}
+    Note right of GW: B waits — queued as a "waiter"
+    PS-->>GW: result for Request A
+    GW->>ST: setComplete("key-xyz", result) — notifies B's waiter
+    GW-->>C: Request A: 201 Created {result}
+    GW-->>C: Request B: 201 Created + X-Cache-Hit: true {same result}
+```
+
+### Flowchart — Decision Logic Inside the Middleware
+
+```
+Incoming POST /api/process-payment
+           │
+           ▼
+  ┌─────────────────────────────┐
+  │  Idempotency-Key header     │
+  │  present?                   │
+  └────────┬────────────────────┘
+      NO   │   YES
+       ▼   │
+    400    ▼
+  ┌──────────────────────────────┐
+  │  Look up key in store        │
+  └───┬──────────┬───────────────┘
+      │          │
+   NOT FOUND   FOUND
+      │          │
+      ▼          ├──── requestHash DIFFERS ──► 422 Conflict
+  Mark as        │
+  Processing     ├──── status = "processing" ──► Wait (Promise)
+  → next()       │                                      │
+                 │                                   result
+                 │                                      │
+                 └──── status = "complete" ─────────────┤
+                            same hash                   ▼
+                                               201 + X-Cache-Hit: true
+                                               (cached response replayed)
+```
 
 ---
 
-## 5. User Stories & Acceptance Criteria
+## Setup Instructions
 
-### User Story 1: The First Transaction (Happy Path)
-**As a** client system (e.g., an online store),  
-**I want to** send a payment request with a unique ID,  
-**So that** my transaction is processed successfully.
+### Prerequisites
 
-**Acceptance Criteria:**
-- [ ] The API accepts a `POST` request to endpoint `/process-payment`.
-- [ ] The request header must contain `Idempotency-Key: <some-unique-string>`.
-- [ ] The request body accepts a JSON object (e.g., `{"amount": 100, "currency": "GHS"}`).
-- [ ] The server simulates processing (e.g., a 2-second delay) and returns a `200 OK` or `201 Created` response.
-- [ ] The response body should include a status message: `"Charged 100 GHS"`.
+- Node.js v18+ and npm
 
-### User Story 2: The Duplicate Attempt (Idempotency Logic)
-**As a** client system,  
-**I want to** safely retry a request if I don't hear back,  
-**So that** I don't accidentally double-charge the user.
+### Install
 
-**Acceptance Criteria:**
-- [ ] If the client sends a second `POST` request with the **same** `Idempotency-Key` and payload:
-    - [ ] The server must **NOT** run the processing logic again (no 2-second delay).
-    - [ ] The server must return the **exact same** response body and status code as the first successful request.
-    - [ ] The server returns a header `X-Cache-Hit: true` to indicate this was a replayed response.
+```bash
+git clone <your-repo-url>
+cd finsef_idem_layer_api
+npm install
+```
 
-### User Story 3: Different Request, Same Key (Fraud/Error Check)
-**As a** security officer,  
-**I want to** reject requests that reuse keys for different payments,  
-**So that** we maintain data integrity.
+### Run
 
-**Acceptance Criteria:**
-- [ ] If a request arrives with an existing `Idempotency-Key` but a **different** request body (e.g., changing amount from 100 to 500):
-    - [ ] The server must return a `422 Unprocessable Entity` or `409 Conflict` error.
-    - [ ] The error message should state: `"Idempotency key already used for a different request body."`
+```bash
+# Production
+npm start
+
+# Development (auto-restart on file changes)
+npm run dev
+```
+
+Server starts at: `http://localhost:3000`
+
+To use a different port:
+
+```bash
+PORT=8080 npm start
+```
 
 ---
 
-## 6. Bonus User Story (The "In-Flight" Check)
-**As a** system architect,  
-**I want to** handle cases where two identical requests arrive at the exact same time,  
-**So that** we don't succumb to race conditions.
+## API Documentation
 
-**Scenario:** Request A arrives. While Request A is still "processing" (during the 2-second delay), Request B (same key) arrives.
+### Base URL
 
-**Acceptance Criteria:**
-- [ ] Request B should not start a new process.
-- [ ] Request B should not return `409 Conflict`.
-- [ ] Request B should wait (block) until Request A finishes, and then return the result of Request A.
+```
+http://localhost:3000
+```
 
 ---
 
-## 7. The "Developer's Choice" Challenge
-We believe great engineers are also product thinkers.
+### `POST /api/process-payment`
 
-**Task:** Identify **one** additional feature or safety mechanism that would make this system better for a real-world Fintech company.
-1.  **Implement it.**
-2.  **Document it:** Explain *why* you added it in your README.
+Process a payment. The `Idempotency-Key` header ensures the payment is charged exactly once regardless of retries.
+
+#### Request Headers
+
+| Header            | Type   | Required | Description                                                   |
+| ----------------- | ------ | -------- | ------------------------------------------------------------- |
+| `Idempotency-Key` | string | Yes      | A unique identifier generated by the client (e.g., a UUID v4) |
+| `Content-Type`    | string | Yes      | Must be `application/json`                                    |
+
+#### Request Body
+
+```json
+{
+  "amount": 100,
+  "currency": "GHS"
+}
+```
+
+| Field      | Type   | Required | Description                            |
+| ---------- | ------ | -------- | -------------------------------------- |
+| `amount`   | number | Yes      | Positive numeric amount to charge      |
+| `currency` | string | Yes      | Currency code (e.g., `"GHS"`, `"USD"`) |
+
+---
+
+#### Response — 201 Created (First Request)
+
+```json
+{
+  "status": "success",
+  "message": "Charged 100 GHS",
+  "transactionId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "amount": 100,
+  "currency": "GHS",
+  "processedAt": "2026-03-12T10:45:00.000Z"
+}
+```
 
 ---
 
-## 8. Documentation Requirements
-Your final `README.md` must replace these instructions. It must cover:
+#### Response — 201 Created + `X-Cache-Hit: true` (Duplicate / Retry)
 
-1.  **Architecture Diagram**
-2.  **Setup Instructions**
-3.  **API Documentation** 
-4.  **Design Decisions** 
-5.  **The Developer's Choice:** Description of the extra feature you added.
+The **exact same body** as the first response is returned. No charge occurs again.
 
----
-Submit your repo link via the [online](https://forms.office.com/e/rGKtfeZCsH) form.
+```
+HTTP/1.1 201 Created
+X-Cache-Hit: true
+```
 
----
-## 🛑 Pre-Submission Checklist
-**WARNING:** Before you submit your solution, you **MUST** pass every item on this list.
-If you miss any of these critical steps, your submission will be **automatically rejected** and you will **NOT** be invited to an interview.
-
-### 1. 📂 Repository & Code
-- [ ] **Public Access:** Is your GitHub repository set to **Public**? (We cannot review private repos).
-- [ ] **Clean Code:** Did you remove unnecessary files (like `node_modules`, `.env` with real keys, or `.DS_Store`)?
-- [ ] **Run Check:** if we clone your repo and run `npm start` (or equivalent), does the server start immediately without crashing?
-
-### 2. 📄 Documentation (Crucial)
-- [ ] **Architecture Diagram:** Did you include a visual Diagram (Flowchart or Sequence Diagram) in the README?
-- [ ] **README Swap:** Did you **DELETE** the original instructions (the problem brief) from this file and replace it with your own documentation?
-- [ ] **API Docs:** Is there a clear list of Endpoints and Example Requests in the README?
-
-
-### 3. 🧹 Git Hygiene
-- [ ] **Commit History:** Does your repo have multiple commits with meaningful messages? (A single "Initial Commit" is a red flag).
+```json
+{
+  "status": "success",
+  "message": "Charged 100 GHS",
+  "transactionId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "amount": 100,
+  "currency": "GHS",
+  "processedAt": "2026-03-12T10:45:00.000Z"
+}
+```
 
 ---
-**Ready?**
-If you checked all the boxes above, submit your repository link in the application form. Good luck! 🚀
+
+#### Response — 422 Unprocessable Entity (Key Reused With Different Body)
+
+```json
+{
+  "error": "Idempotency key already used for a different request body."
+}
+```
+
+---
+
+#### Response — 400 Bad Request (Missing Header or Fields)
+
+```json
+{ "error": "Missing required header: Idempotency-Key" }
+```
+
+```json
+{ "error": "\"amount\" must be a positive number." }
+```
+
+---
+
+### `GET /health`
+
+Liveness probe.
+
+```json
+{ "status": "ok", "timestamp": "2026-03-12T10:45:00.000Z" }
+```
+
+---
+
+### Example — curl
+
+```bash
+# ── First request ─────────────────────────────────────────────────────────────
+curl -X POST http://localhost:3000/api/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: unique-key-001" \
+  -d '{"amount": 100, "currency": "GHS"}'
+
+# ── Retry (duplicate) — returns cached response immediately ───────────────────
+curl -X POST http://localhost:3000/api/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: unique-key-001" \
+  -d '{"amount": 100, "currency": "GHS"}'
+
+# ── Fraud check — same key, different body ────────────────────────────────────
+curl -X POST http://localhost:3000/api/process-payment \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: unique-key-001" \
+  -d '{"amount": 500, "currency": "GHS"}'
+```
+
+---
+
+## Design Decisions
+
+### 1. In-Memory Store with a Redis-Compatible Interface
+
+The store (`src/store/idempotencyStore.js`) is built with a clean, minimal API (`get`, `setProcessing`, `setComplete`, `setFailed`, `waitForResult`). Swapping it for Redis requires only replacing this one file — all other code is unaffected. Using an in-memory store is appropriate for a single-node assessment environment.
+
+### 2. Deterministic Request Body Hashing (US3)
+
+The body is hashed using SHA-256 after **sorting keys alphabetically**. This means `{"amount":100,"currency":"GHS"}` and `{"currency":"GHS","amount":100}` produce the **same hash**, preventing false fraud alerts caused by JSON serialization order differences between clients.
+
+### 3. Promise-Based Waiter Queue (Bonus — Race Condition)
+
+When Request B arrives with the same key while Request A is still processing, B is added to a `waiters` array on the store entry (a resolve-callback queue). When `setComplete` is called for A's result, it iterates the array and resolves every queued Promise. No polling, no extra server round-trips — O(1) notification.
+
+### 4. Fail-Open on Processing Errors
+
+If a request fails mid-flight (unhandled exception), `setFailed` removes the key entirely and notifies any waiters with `null`. This allows the client to **retry with a new key** rather than being permanently blocked by a poisoned entry.
+
+### 5. Input Validation Before Processing
+
+The route validates `amount` and `currency` **before** calling the payment service. Invalid requests immediately call `setFailed` on the store so stale processing entries are never left behind.
+
+---
+
+## Developer's Choice Feature — TTL Key Expiry
+
+### What It Is
+
+Every idempotency key automatically expires after **24 hours** (configurable via `IDEMPOTENCY_TTL_MS` in `src/store/idempotencyStore.js`).
+
+### Why It Matters
+
+In a real Fintech system, storing idempotency keys forever has two problems:
+
+| Problem                 | Consequence                                                                                    |
+| ----------------------- | ---------------------------------------------------------------------------------------------- |
+| **Memory leak**         | A long-running server accumulates millions of keys, eventually crashing                        |
+| **Stale key confusion** | A key from 6 months ago being replayed makes no sense in the context of an active payment flow |
+
+This matches **Stripe's production behaviour** — their idempotency keys also expire after 24 hours, after which a new key must be used.
+
+### Implementation
+
+- **Lazy eviction**: Every `get(key)` call checks `Date.now() - entry.createdAt > TTL`. If expired, the entry is deleted before returning `null`.
+- **Active sweep**: A `setInterval` runs every hour to evict all expired entries in the background — preventing memory accumulation even for keys that are never read again.
+- The sweep timer calls `.unref()` so it **never prevents the Node.js process from exiting cleanly**.
+
+---
+
+## Project Structure
+
+```
+src/
+├── server.js               ← Express app entry point
+├── routes/
+│   └── payments.js         ← POST /api/process-payment
+├── middleware/
+│   └── idempotency.js      ← Core idempotency check (all user stories)
+├── store/
+│   └── idempotencyStore.js ← In-memory key/response store with TTL
+└── services/
+    └── paymentService.js   ← Simulated 2-second payment processing
+```
+
+### Simulation
+
+
+https://github.com/user-attachments/assets/8c077fbe-351f-48fe-a643-6bab95948fee
+
+
