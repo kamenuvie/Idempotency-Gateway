@@ -17,6 +17,12 @@
 const crypto = require('crypto');
 const idempotencyStore = require('../store/idempotencyStore');
 
+function compactKey(key) {
+  if (!key) return '-';
+  if (key.length <= 12) return key;
+  return `${key.slice(0, 8)}...${key.slice(-4)}`;
+}
+
 /**
  * Produces a stable, order-independent hash of the request body.
  * Sorting keys means { a:1, b:2 } and { b:2, a:1 } hash identically.
@@ -31,6 +37,7 @@ async function idempotencyMiddleware(req, res, next) {
 
   // ── Guard: header is mandatory ───────────────────────────────────────────
   if (!key || key.trim() === '') {
+    console.warn(`[IDEMPOTENCY] missing key method=${req.method} path=${req.originalUrl}`);
     return res.status(400).json({
       error: 'Missing required header: Idempotency-Key',
     });
@@ -50,12 +57,14 @@ async function idempotencyMiddleware(req, res, next) {
 
   // ── No entry → first time seeing this key ────────────────────────────────
   if (!existing) {
+    console.log(`[IDEMPOTENCY] first request key=${compactKey(key)} -> set processing`);
     idempotencyStore.setProcessing(key, requestHash);
     return next();
   }
 
   // ── Key exists with a DIFFERENT body → reject (US3) ──────────────────────
   if (existing.requestHash !== requestHash) {
+    console.warn(`[IDEMPOTENCY] conflict key=${compactKey(key)} -> same key, different body`);
     return res.status(422).json({
       error: 'Idempotency key already used for a different request body.',
     });
@@ -63,14 +72,18 @@ async function idempotencyMiddleware(req, res, next) {
 
   // ── Same key, same body, still processing → wait for result (Bonus) ──────
   if (existing.status === 'processing') {
+    console.log(`[IDEMPOTENCY] in-flight duplicate key=${compactKey(key)} -> waiting for result`);
     const result = await idempotencyStore.waitForResult(key);
 
     if (!result) {
+      console.error(`[IDEMPOTENCY] in-flight original failed key=${compactKey(key)}`);
       // The original request failed; allow client to retry with a new key
       return res.status(500).json({
         error: 'The original request failed during processing. Please retry with a new Idempotency-Key.',
       });
     }
+
+    console.log(`[IDEMPOTENCY] in-flight duplicate replay key=${compactKey(key)}`);
 
     return res
       .status(result.statusCode)
@@ -79,6 +92,7 @@ async function idempotencyMiddleware(req, res, next) {
   }
 
   // ── Same key, same body, already complete → replay cached response (US2) ──
+  console.log(`[IDEMPOTENCY] cache replay key=${compactKey(key)}`);
   return res
     .status(existing.statusCode)
     .set('X-Cache-Hit', 'true')
